@@ -1,0 +1,72 @@
+[project]
+name = "mcp-gateway"
+version = "1.0.0"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["alembic/"]
+
+# Temporary: these modules still use legacy SQLAlchemy patterns that mypy
+# interprets as Column[...] at runtime-facing callsites. Keep mypy enabled
+# for the rest of the app until these modules are migrated to Mapped[].
+[[tool.mypy.overrides]]
+module = [
+  "app.api.api_keys",
+  "app.api.auth",
+  "app.api.auth_entra",
+  "app.api.connections",
+  "app.api.mcp_sse",
+  "app.api.oauth",
+  "app.api.query",
+  "app.api.tenants",
+  "app.api.tools",
+  "app.config",
+  "app.core.dependencies",
+  "app.main",
+  "app.models",
+  "app.services.entra",
+  "app.services.llm",
+  "app.tools",
+  "app.tools.example",
+  "app.tools.filesystem",
+  "app.tools.sql",
+]
+ignore_errors = true
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+branch = "main"
+changelog_file = "CHANGELOG.md"
+build_command = ""
+upload_to_pypi = false
+upload_to_vcs_release = true
+commit_message = "chore(release): {version} [skip ci]"
+
+[tool.semantic_release.commit_parser_options]
+# Conventional commit types that trigger a release
+# feat → minor bump, fix/perf → patch bump, breaking change → major bump
+allowed_tags = ["feat", "fix", "perf", "refactor", "docs", "chore", "ci", "test", "style"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+
+[tool.semantic_release.changelog]
+exclude_commit_patterns = [
+  "chore\\(release\\):",
+  "chore\\(deps\\):",
+  "Merge pull request",
+  "Merge branch",
+]
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false

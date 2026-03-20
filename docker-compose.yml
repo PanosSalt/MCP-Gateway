@@ -1,0 +1,75 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://mcpuser:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@db:5432/mcpgateway
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be set (min 32 chars)}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - BASE_URL=${BASE_URL:-http://localhost:8000}
+      - ENTRA_GRAPH_URL=${ENTRA_GRAPH_URL:-https://graph.microsoft.com/v1.0}
+      - FILESYSTEM_ALLOWED_DIRS=${FILESYSTEM_ALLOWED_DIRS:-}
+    volumes:
+      - ./data:/data
+      - ./projects:/projects
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mcpuser
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: mcpgateway
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcpuser -d mcpgateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  sample_postgres:
+    image: postgres:16-alpine
+    profiles: [dev]
+    environment:
+      POSTGRES_USER: sampleuser
+      POSTGRES_PASSWORD: samplepass
+      POSTGRES_DB: sampledb
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./docs/seed/postgres_seed.sql:/docker-entrypoint-initdb.d/seed.sql
+      - sample_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sampleuser -d sampledb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  sample_mysql:
+    image: mysql:8-debian
+    profiles: [dev]
+    environment:
+      MYSQL_USER: sampleuser
+      MYSQL_PASSWORD: samplepass
+      MYSQL_DATABASE: sampledb
+      MYSQL_ROOT_PASSWORD: rootpass
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./docs/seed/mysql_seed.sql:/docker-entrypoint-initdb.d/seed.sql
+      - sample_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "sampleuser", "-psamplepass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  sample_postgres_data:
+  sample_mysql_data:
