@@ -37,7 +37,37 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
+      - name: Capture version before release
+        id: before
+        run: echo "v=$(grep -m1 '^version = ' pyproject.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Run semantic release
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: semantic-release version --push --changelog --vcs-release
+
+      - name: Capture version after release
+        id: after
+        run: echo "v=$(grep -m1 '^version = ' pyproject.toml)" >> "$GITHUB_OUTPUT"
+
+      # Only publish to the MCP Registry when semantic-release actually cut
+      # a new version (it no-ops on commits that don't warrant a release).
+      - name: Install mcp-publisher
+        if: steps.before.outputs.v != steps.after.outputs.v
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Sync version into server.json
+        if: steps.before.outputs.v != steps.after.outputs.v
+        run: |
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          jq --arg v "$VERSION" '.version = $v' server.json > server.tmp.json
+          mv server.tmp.json server.json
+
+      - name: Authenticate to MCP Registry
+        if: steps.before.outputs.v != steps.after.outputs.v
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        if: steps.before.outputs.v != steps.after.outputs.v
+        run: ./mcp-publisher publish
