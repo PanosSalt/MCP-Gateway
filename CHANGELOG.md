@@ -10,6 +10,15 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- version list -->
 
+## v1.0.2 (2026-09-18)
+
+### Bug Fixes
+
+- **changelog**: Add insertion marker and backfill v1.0.0/v1.0.1 entries
+  ([#3](https://github.com/PanosSalt/MCP-Gateway/pull/3),
+  [`1dcfb9a`](https://github.com/PanosSalt/MCP-Gateway/commit/1dcfb9aa1f4f68c6d649b0a6dd61731900efff6b))
+
+
 ## v1.0.1 (2026-09-18)
 
 ### Bug Fixes
