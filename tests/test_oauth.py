@@ -545,3 +545,30 @@ def test_refresh_local_user_unaffected(client: TestClient, db_session, tenant_an
     assert resp.status_code == 200
     db_session.refresh(admin)
     assert admin.role == Role.admin
+
+
+# ── Rate limiting ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def reset_limiter():
+    """slowapi's in-memory storage is process-global; isolate these tests."""
+    from app.core.limiter import limiter
+
+    limiter.reset()
+    yield
+    limiter.reset()
+
+
+def test_oauth_register_is_rate_limited(
+    client: TestClient, tenant_and_admin, reset_limiter,
+):
+    """Dynamic client registration is unauthenticated — it must be capped."""
+    tenant, _ = tenant_and_admin
+    url = f"/t/{tenant.slug}/oauth/register"
+    payload = {"client_name": "probe", "redirect_uris": ["http://localhost:1/cb"]}
+
+    codes = [client.post(url, json=payload).status_code for _ in range(11)]
+
+    assert codes[0] == 200
+    assert codes[-1] == 429, f"expected a 429 within 11 requests, got {codes}"

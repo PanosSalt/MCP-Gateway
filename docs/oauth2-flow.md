@@ -72,10 +72,19 @@ Response:
   "registration_endpoint": "https://gateway.example.com/t/my-org/oauth/register",
   "response_types_supported": ["code"],
   "grant_types_supported": ["authorization_code", "refresh_token"],
-  "code_challenge_methods_supported": ["S256"],
-  "token_endpoint_auth_methods_supported": ["none"]
+  "code_challenge_methods_supported": ["S256"]
 }
 ```
+
+The gateway does not advertise `token_endpoint_auth_methods_supported`; clients
+requiring it should assume `none` (registration returns
+`"token_endpoint_auth_method": "none"`).
+
+The same document is served from two paths: the RFC 8414 root-level form above,
+and a tenant-prefixed `/t/{slug}/.well-known/oauth-authorization-server`. The
+protected-resource metadata is likewise available at both
+`/.well-known/oauth-protected-resource/t/{slug}/mcp/sse` and
+`/t/{slug}/.well-known/oauth-protected-resource`.
 
 ### Protected Resource Metadata
 
@@ -100,14 +109,25 @@ Request:
 Response:
 ```json
 {
-  "client_id": "my-org_a1b2c3d4e5f6",
+  "client_id": "My MCP Client-my-org",
   "client_name": "My MCP Client",
   "redirect_uris": ["http://localhost:3000/callback"],
-  "token_endpoint_auth_method": "none"
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",
+  "client_id_issued_at": 1758240000
 }
 ```
 
-The `client_id` is namespaced to the tenant (`{slug}_{random}`). `client_name` defaults to `"MCP Client"` if omitted.
+The `client_id` is `{client_name}-{slug}`. `client_name` defaults to
+`"mcp-client"` if omitted.
+
+> Note there is **no random component**: two clients registering the same
+> `client_name` against the same tenant receive an identical `client_id`.
+> Registration is not authenticated and issues no secret, so the `client_id` is
+> an identifier, not a credential — PKCE and the loopback-only `redirect_uri`
+> check are what actually secure the flow. Use a distinct `client_name` per
+> client if you want them distinguishable in logs.
 
 ### Authorization
 
@@ -120,7 +140,7 @@ The `client_id` is namespaced to the tenant (`{slug}_{random}`). `client_name` d
 | `redirect_uri` | Yes | Must be loopback (`localhost`, `127.0.0.1`, or `::1`) |
 | `state` | Yes | Opaque value for CSRF protection |
 | `code_challenge` | Yes | Base64url-encoded SHA-256 of the code verifier |
-| `code_challenge_method` | Yes | Must be `S256` |
+| `code_challenge_method` | No | Defaults to `S256`; any other value is rejected |
 
 If the tenant has Entra SSO configured, the user is redirected to Microsoft for login. Otherwise, the gateway shows its own login form.
 
@@ -177,7 +197,7 @@ Response (both grants):
   "access_token": "eyJ...",
   "token_type": "bearer",
   "expires_in": 900,
-  "refresh_token": "mgw_rt_..."
+  "refresh_token": "IjX3n...."
 }
 ```
 
@@ -187,7 +207,8 @@ Response (both grants):
 
 PKCE prevents authorization code interception attacks. The flow:
 
-1. Client generates a random `code_verifier` (43-128 characters, URL-safe)
+1. Client generates a random `code_verifier` (RFC 7636 specifies 43-128 URL-safe
+   characters; the gateway does not enforce the length — it only compares digests)
 2. Client computes `code_challenge = base64url(sha256(code_verifier))`
 3. Client sends `code_challenge` + `code_challenge_method=S256` in the authorize request
 4. Gateway stores the challenge with the OAuth state
@@ -216,7 +237,13 @@ Each refresh token is **single-use**. When a client refreshes:
 3. A new access token + refresh token pair is issued
 4. The new refresh token is stored (hashed)
 
-If the same refresh token is used twice (replay attack), the second attempt fails with 401.
+Refresh tokens are opaque `secrets.token_urlsafe(32)` values with **no prefix**,
+stored only as a SHA-256 hash.
+
+If the same refresh token is used twice (replay attack), the second attempt
+fails with **400** `Invalid or expired refresh token`. Note the gateway does not
+implement reuse *detection* — a replayed token is simply rejected; it does not
+revoke the rest of the token family.
 
 ---
 
@@ -241,7 +268,10 @@ When an Entra SSO user refreshes their token, the gateway re-resolves their role
 1. User presents a refresh token with `grant_type=refresh_token`
 2. Gateway detects the user is an Entra user (`auth_provider=entra`)
 3. Gateway acquires an app-only token via client credentials grant
-4. Gateway queries `GET /users/{oid}/transitiveMemberOf` on Microsoft Graph
+4. Gateway queries `GET /users/{oid}/transitiveMemberOf/microsoft.graph.group?$select=id`
+   on Microsoft Graph. The `/microsoft.graph.group` type cast is what keeps
+   `GroupMember.Read.All` sufficient — without it the call would need
+   directory-wide read
 5. Gateway maps group memberships to a role using the tenant's Entra config
 6. If the role changed, the user record is updated in the database
 7. The new access token is issued with the updated role
@@ -251,11 +281,15 @@ When an Entra SSO user refreshes their token, the gateway re-resolves their role
 | Scenario | Behaviour |
 |----------|-----------|
 | User promoted (e.g. analyst → admin) | Role updated in DB, new token reflects new role |
-| User removed from all groups | User deactivated in DB; refresh rejected with 403; re-login also denied until re-added to a group |
+| User removed from all groups | User deactivated in DB; refresh rejected with 403. Re-login is also denied, but as a **302 redirect** back to `redirect_uri` with `error=access_denied&error_description=Not+in+any+authorised+group` — not a 403. An existing user record is deactivated on that path too |
 | Entra config deleted for the tenant | Refresh rejected with 403; user must re-authenticate |
-| Azure AD / Graph API unreachable | Warning logged; refresh proceeds with existing DB role |
+| Azure AD / Graph API unreachable | Warning logged; refresh proceeds with existing DB role. Only transport/HTTP failures are treated this way — an unexpected error propagates as a 500 rather than silently extending the role |
+| User is in more than 20 pages of groups | Pagination stops at 20 pages; a warning is logged and the role is resolved from the groups seen so far. A user whose role-granting group falls outside that window can **silently lose their role** |
 
 **Known limitation**: If Azure AD is unreachable during a token refresh, a user who was removed from all groups will retain their old role until Graph API recovers. This trade-off prioritises availability over immediate revocation.
+
+The role sync runs *before* the presented refresh token is revoked, so a
+transient failure that aborts the refresh does not consume the caller's token.
 
 ### MCP tool calls
 
@@ -286,15 +320,18 @@ The Entra app registration must have:
   - `http://<gateway-url>/t/<slug>/oauth/entra-callback` (MCP OAuth flow)
 - **API permissions** (Microsoft Graph):
   - **Delegated**: `openid`, `profile`, `email`, `User.Read`, `GroupMember.Read.All`
-  - **Application**: `Directory.Read.All` (used for role sync during token refresh via client credentials flow)
-- **Admin consent** granted for the delegated `GroupMember.Read.All` and the application `Directory.Read.All`
+  - **Application**: `GroupMember.Read.All` (used for role sync during token refresh via client credentials flow)
+- **Admin consent** granted for both the delegated and the application `GroupMember.Read.All`
 
 The delegated scopes are used during interactive login. The application permission is a **separate grant** — it allows the gateway to query a user's group memberships server-to-server during token refresh, without a user-delegated token.
 
-> **Note:** `Directory.Read.All` is required (not `GroupMember.Read.All`) because the gateway uses `GET /users/{oid}/transitiveMemberOf` with an app-only token, which requires directory-level read access.
+> **Note:** `GroupMember.Read.All` is sufficient; `Directory.Read.All` is **not** required. The gateway queries
+> `GET /users/{oid}/transitiveMemberOf/microsoft.graph.group`, and the `/microsoft.graph.group` OData type cast
+> narrows the request to group objects only, which `GroupMember.Read.All` covers. Do not grant directory-wide
+> read access for this.
 
 To add the Application permission in Azure portal:
 1. Go to **App registrations** → your app → **API permissions**
 2. Click **Add a permission** → **Microsoft Graph** → **Application permissions**
-3. Search for `Directory.Read.All` and select it
+3. Search for `GroupMember.Read.All` and select it
 4. Click **Grant admin consent** for the new permission

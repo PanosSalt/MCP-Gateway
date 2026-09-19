@@ -116,7 +116,15 @@ class SqlToolProvider:
         return tools
 
     def get_tool_defaults(self, ctx: ToolContext) -> list[ToolDefault]:
-        connections = _get_all_connections(ctx)
+        # Admins need every connection to configure role overrides.  Everyone
+        # else sees only what their role already grants — the defaults carry
+        # connection name, id and description, so an unfiltered list would
+        # disclose the existence of connections the caller cannot use.
+        connections = (
+            _get_all_connections(ctx)
+            if ctx.user.role == Role.admin
+            else _get_visible_connections(ctx)
+        )
         defaults: list[ToolDefault] = [
             ToolDefault(
                 name="list_connections",
@@ -196,14 +204,14 @@ class SqlToolProvider:
             try:
                 assert_safe_select(sql, conn.db_type.value)
             except ValueError as exc:
-                write_audit_log(ctx.db, "tool.execute_sql.rejected", user=ctx.user, metadata={
+                write_audit_log(ctx.db, "tool.execute_sql.rejected", user=ctx.user, ip=ctx.ip, metadata={
                     "tool": name, "connection_id": conn.id, "reason": str(exc),
                 })
                 return [TextContent(type="text", text=f"SQL rejected: {exc}")]
             try:
                 conn_str = decrypt(conn.encrypted_conn_str)
                 rows = await mcp_client.run_query(conn.db_type, conn_str, sql)
-                write_audit_log(ctx.db, "tool.execute_sql", user=ctx.user, metadata={
+                write_audit_log(ctx.db, "tool.execute_sql", user=ctx.user, ip=ctx.ip, metadata={
                     "tool": name, "connection_id": conn.id, "sql_preview": sql[:200],
                     "row_count": len(rows),
                 })
@@ -219,7 +227,7 @@ class SqlToolProvider:
                 ]
             except Exception as exc:
                 logger.error("Execute tool %s failed: %s", name, exc, exc_info=True)
-                write_audit_log(ctx.db, "tool.execute_sql.error", user=ctx.user, metadata={
+                write_audit_log(ctx.db, "tool.execute_sql.error", user=ctx.user, ip=ctx.ip, metadata={
                     "tool": name, "connection_id": conn.id, "error": str(exc),
                 })
                 return [TextContent(type="text", text=f"Error: {exc}")]

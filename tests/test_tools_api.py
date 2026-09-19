@@ -155,6 +155,54 @@ def test_list_tools_requires_auth(client: TestClient):
     assert resp.status_code in (401, 403)
 
 
+@pytest.fixture
+def admin_only_connection(db_session, tenant_and_admin):
+    tenant, _ = tenant_and_admin
+    conn = DBConnection(
+        name="Payroll DB",
+        db_type=DBType.postgres,
+        encrypted_conn_str="enc",
+        tenant_id=tenant.id,
+        min_role=Role.admin,
+        description="Contains salary data",
+    )
+    db_session.add(conn)
+    db_session.commit()
+    db_session.refresh(conn)
+    return conn
+
+
+def test_list_tools_hides_inaccessible_connections_from_viewer(
+    client: TestClient, admin_only_connection, viewer_header,
+):
+    """A viewer must not learn that an admin-only connection exists.
+
+    Regression test: get_tool_defaults previously used the unfiltered
+    connection query, leaking connection name, id and description to
+    every authenticated user regardless of role.
+    """
+    resp = client.get("/tools/", headers=viewer_header)
+    assert resp.status_code == 200
+    body = resp.text
+    tools = resp.json()
+
+    assert not any(
+        t["connection_id"] == admin_only_connection.id for t in tools
+    )
+    assert "Payroll DB" not in body
+    assert "Contains salary data" not in body
+
+
+def test_list_tools_shows_all_connections_to_admin(
+    client: TestClient, admin_only_connection, admin_header,
+):
+    """Admins keep the full list — they need it to configure role overrides."""
+    resp = client.get("/tools/", headers=admin_header)
+    assert resp.status_code == 200
+    tools = resp.json()
+    assert any(t["connection_id"] == admin_only_connection.id for t in tools)
+
+
 def test_list_tools_cross_tenant_isolation(
     client: TestClient, db_session, tenant_and_admin, admin_header,
 ):
