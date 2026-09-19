@@ -6,4 +6,4 @@ version and is bumped automatically by python-semantic-release (see
 version string anywhere else.
 """
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"

@@ -7,7 +7,7 @@
     "url": "https://github.com/PanosSalt/MCP-Gateway",
     "source": "github"
   },
-  "version": "1.0.2",
+  "version": "1.0.3",
   "remotes": [
     {
       "type": "sse",

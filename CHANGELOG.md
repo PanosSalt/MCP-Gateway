@@ -10,6 +10,21 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 <!-- version list -->
 
+## v1.0.3 (2026-09-19)
+
+### Bug Fixes
+
+- Address MCP marketplace security review, close a cross-role metadata leak in GET /tools/, and
+  correct documentation that had drifted from the code
+  ([#4](https://github.com/PanosSalt/MCP-Gateway/pull/4),
+  [`9eaf50f`](https://github.com/PanosSalt/MCP-Gateway/commit/9eaf50fd5b541eedf9dc8cfdac53475854a0c396))
+
+### Continuous Integration
+
+- Auto-publish to the MCP Registry on release
+  ([`0bb29f4`](https://github.com/PanosSalt/MCP-Gateway/commit/0bb29f41f4444bf87bb7ad89d9906e7ccfae1105))
+
+
 ## v1.0.2 (2026-09-18)
 
 ### Bug Fixes
