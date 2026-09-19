@@ -13,6 +13,8 @@ from app.models import Role, ToolRoleOverride, User
 class ToolContext:
     user: User
     db: Session
+    # Client IP of the originating MCP connection, recorded on audit entries.
+    ip: str | None = None
     # Lazy cache populated by _get_all_connections in sql.py.
     # Avoids re-querying within the same context lifetime.
     conn_cache: list | None = field(default=None, repr=False, compare=False)

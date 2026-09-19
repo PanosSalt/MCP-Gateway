@@ -16,7 +16,7 @@ Both paths use the same OAuth 2.1 + PKCE flow with Claude Desktop — no API key
 | Tool | Notes |
 |---|---|
 | Docker + Docker Compose | To run the gateway and sample databases |
-| Node.js ≥ 20 + npx | Gateway spawns MCP database servers via `npx` |
+| Node.js ≥ 20 + npx | Client-side only — Claude Desktop runs `mcp-remote` via `npx`. The gateway itself connects to databases directly over SQLAlchemy and spawns no subprocesses. |
 | Claude Desktop | Download from [claude.ai/download](https://claude.ai/download) |
 | A modern browser | For the Admin UI and OAuth login |
 
@@ -34,7 +34,7 @@ Edit `.env`:
 
 ```env
 SECRET_KEY=your-random-secret-here
-ENCRYPTION_KEY=your-32-byte-random-key-here!!
+ENCRYPTION_KEY=<paste the generated value below — do not use a placeholder>
 BASE_URL=http://localhost:8000
 POSTGRES_PASSWORD=mcppass
 ```
@@ -43,7 +43,7 @@ Generate secure values:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_hex(32))"          # SECRET_KEY
-python3 -c "import secrets; print(secrets.token_urlsafe(32)[:32])"  # ENCRYPTION_KEY
+python3 -c "import secrets; print(secrets.token_hex(32))"          # ENCRYPTION_KEY
 ```
 
 ### 1b. Start the stack
@@ -232,7 +232,7 @@ Fully restart Claude Desktop. On first connection a browser window opens showing
 
 If you want to skip the OAuth browser flow entirely (useful for Cursor, CI/CD, or headless environments), create an API key and pass it in the URL:
 
-1. In the Admin UI go to **API Keys** and click **+ New key** (or use `POST /api-keys/`)
+1. In the Admin UI go to **API Keys** and click **+ New key** (or use `POST /api-keys`)
 2. Copy the raw key (shown once only)
 3. Use this config:
 
@@ -272,8 +272,8 @@ The app registration must have:
 - Redirect URI: `http://localhost:8000/t/local-test-corp/oauth/entra-callback`
 - API permissions (Microsoft Graph):
   - **Delegated**: `openid`, `profile`, `email`, `User.Read`, `GroupMember.Read.All`
-  - **Application**: `Directory.Read.All` (required for role sync during token refresh)
-  - Grant **admin consent** for the delegated `GroupMember.Read.All` and the application `Directory.Read.All`
+  - **Application**: `GroupMember.Read.All` (required for role sync during token refresh)
+  - Grant **admin consent** for both the delegated and the application `GroupMember.Read.All`
 
 ### B2. Configure Entra on the tenant
 
@@ -333,7 +333,7 @@ Fully restart Claude Desktop. On first connection a browser window opens and —
 | Member of Admin Group ID | `admin` |
 | Member of Analyst Group ID | `analyst` |
 | Member of Viewer Group ID | `viewer` |
-| Not in any configured group | Login denied (403) |
+| Not in any configured group | Login denied — a **302** back to the client's `redirect_uri` with `error=access_denied`, not a 403. An existing user record is deactivated |
 
 Role is re-evaluated on every token refresh and login. Removing a user from all Azure AD groups deactivates their gateway account and blocks further access. Re-adding them to a group re-activates the account automatically on their next successful login. Entra-provisioned users appear in the **Users** tab with provider `ENTRA` and can be removed from there if needed.
 
@@ -376,7 +376,13 @@ The **Query** tab in the Admin UI lets you run natural language queries from the
 ### Claude Desktop doesn't show the MCP Gateway tools
 
 1. Check the gateway: `curl http://localhost:8000/health`
-2. Check the SSE endpoint: `curl http://localhost:8000/t/local-test-corp/mcp/sse` (should stream, not 404)
+2. Check the SSE endpoint responds:
+   ```bash
+   curl -i http://localhost:8000/t/local-test-corp/mcp/sse
+   ```
+   Expect **`401 Unauthorized`** with a `WWW-Authenticate: Bearer resource_metadata=...`
+   header. That is the correct unauthenticated response and is what triggers
+   `mcp-remote`'s browser login — a `404` means the tenant slug is wrong.
 3. Fully quit and reopen Claude Desktop (not just close the window)
 4. Check Claude Desktop logs:
    - macOS: `~/Library/Logs/Claude/`
@@ -387,7 +393,7 @@ The **Query** tab in the Admin UI lets you run natural language queries from the
 - Verify the tenant slug in the config URL matches the one you created
 - Verify `BASE_URL=http://localhost:8000` is set in `.env`
 
-### Entra login: "Not in any authorised group" (403)
+### Entra login: "Not in any authorised group"
 
 The signed-in user is not a member of any of the three group IDs configured in B2. Add the user to an Azure AD group, or update the group IDs in the SSO Config to match the user's actual groups.
 

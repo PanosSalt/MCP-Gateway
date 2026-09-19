@@ -37,7 +37,10 @@ This `min_role` determines:
 - The **default minimum role** for the connection's generated MCP tools (`get_schema_*`, `execute_sql_*`)
 - Who can **see** the tools in `GET /tools/` and in the MCP tool list
 
-Users below the connection's `min_role` cannot see the connection or any of its tools at all.
+Users below the connection's `min_role` cannot see the connection or any of its tools.
+Administrators are the exception: `GET /tools/` returns every connection's tools to an
+admin regardless of `min_role`, because admins need the full list to configure the
+overrides described below.
 
 ---
 
@@ -52,9 +55,30 @@ Each tool type has its own default minimum role, which may differ from the conne
 | `execute_sql_{name}_{id}` | `analyst` | Higher default because it runs queries |
 | `get_current_time` | `viewer` | Utility tool, no data access |
 | `fs_read_file` | `analyst` | Filesystem read access |
+| `fs_list_directory` | `analyst` | Filesystem read access |
+| `fs_directory_tree` | `analyst` | Filesystem read access |
+| `fs_search_files` | `analyst` | Filesystem read access |
+| `fs_get_file_info` | `analyst` | Filesystem read access |
 | `fs_write_file` | `admin` | Filesystem write access |
+| `fs_create_directory` | `admin` | Filesystem write access |
+| `fs_move_file` | `admin` | Filesystem write access |
 
-The effective minimum role for a tool is the **higher** of the connection's `min_role` and the tool's own default. For example, if a connection has `min_role: admin`, then `get_schema` also requires `admin` even though its default is the connection's `min_role`.
+The effective minimum role is simply **the override if one exists, otherwise the
+tool's default** — the two values are not combined, and no maximum is taken:
+
+```
+effective_min_role = override.min_role if override exists else tool.default_min_role
+```
+
+Note what this means for `execute_sql_*`: its default is a flat `analyst`
+regardless of the connection's `min_role`. A connection with `min_role: admin`
+still produces an `execute_sql` tool whose *default* is `analyst`. Access to
+that connection's tools is gated separately, by connection visibility — not by
+arithmetic on the two roles. Set an explicit per-tool override if you need the
+execute tool locked to `admin`.
+
+Each `tool_type` returned by `GET /tools/` is one of `schema`, `execute`,
+`utility`, `custom` or `filesystem`.
 
 ---
 

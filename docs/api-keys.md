@@ -16,13 +16,19 @@ API keys provide long-lived programmatic access to MCP Gateway without requiring
 
 ## Key Format
 
-Keys follow the format `mgw_{prefix}_{random}`:
+Keys follow the format `mgw_{first8}_{random}`, where `random` is a 43-character
+`secrets.token_urlsafe(32)` value and `first8` is its first 8 characters:
 
 - `mgw_` — fixed namespace prefix
-- 8-character prefix — stored in plaintext for efficient lookup
-- Random suffix — only known to the key holder
+- `mgw_{first8}` — the **stored prefix** (12 characters), kept in plaintext for
+  lookup and display
+- The full 43-character random value follows. Note it *repeats* the 8 characters
+  already shown in the prefix — they are not disjoint halves
 
-Example: `mgw_a1b2c3d4_e5f6g7h8i9j0k1l2m3n4o5p6`
+Only the full key is accepted for authentication, and only its HMAC-SHA-256
+digest is stored. A full key is 56 characters.
+
+Example shape: `mgw_hPR2Rod3_hPR2Rod3<35 more characters>`
 
 ---
 
@@ -30,7 +36,7 @@ Example: `mgw_a1b2c3d4_e5f6g7h8i9j0k1l2m3n4o5p6`
 
 ### Create a Key
 
-**POST** `/api-keys/`
+**POST** `/api-keys`
 
 **Authentication:** Any authenticated user (JWT or existing API key)
 
@@ -69,7 +75,7 @@ The `raw_key` field is only included in the create response. Store it immediatel
 
 ### List Keys
 
-**GET** `/api-keys/`
+**GET** `/api-keys`
 
 **Authentication:** Any authenticated user
 
@@ -98,12 +104,7 @@ Response:
 
 Sets the `revoked_at` timestamp. The key immediately stops working. Revocation is permanent.
 
-Response:
-```json
-{
-  "detail": "API key revoked"
-}
-```
+Response: **`204 No Content`** with an empty body.
 
 ---
 
@@ -118,7 +119,7 @@ curl "http://localhost:8000/connections/?api_key=mgw_a1b2c3d4_e5f6..."
 # MCP SSE endpoint (tenant-scoped, recommended)
 curl "http://localhost:8000/t/my-org/mcp/sse?api_key=mgw_a1b2c3d4_e5f6..."
 
-# MCP SSE endpoint (legacy, deprecated — sunset 2026-06-01)
+# MCP SSE endpoint (legacy, deprecated — sunset 2027-03-01)
 curl "http://localhost:8000/mcp/sse?api_key=mgw_a1b2c3d4_e5f6..."
 ```
 
@@ -182,5 +183,5 @@ The **API Keys** tab in the admin UI allows users to:
 
 | Event | When |
 |-------|------|
-| `key.created` | New key generated (metadata: `name`, `prefix`) |
-| `key.revoked` | Key revoked (metadata: `name`, `prefix`) |
+| `key.created` | New key generated (metadata: `key_name`, `key_prefix`) |
+| `key.revoked` | Key revoked (metadata: `key_prefix` only — no name) |

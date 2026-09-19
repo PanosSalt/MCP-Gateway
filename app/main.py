@@ -22,12 +22,14 @@ from starlette.responses import PlainTextResponse
 from alembic.config import Config as _AlembicConfig
 from alembic.runtime.migration import MigrationContext as _MigrationContext
 from alembic.script import ScriptDirectory as _ScriptDirectory
+from app import __version__
 from app.api import api_keys, audit_logs, auth, auth_entra, connections, mcp_sse, oauth, query, tenants, tools
 from app.config import get_settings
-from app.core.limiter import limiter
+from app.core.limiter import limiter, warn_if_unshared_storage
 from app.core.log_filter import install_filters
 from app.database import get_engine, get_session
 from app.services.audit import backfill_audit_emails
+from app.tools.filesystem import validate_allowed_dirs_at_startup
 
 
 class _JSONFormatter(logging.Formatter):
@@ -232,6 +234,8 @@ def _cleanup_expired_oauth(db) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _log = logging.getLogger(__name__)
+    validate_allowed_dirs_at_startup()
+    warn_if_unshared_storage()
     db = get_session()
     try:
         backfill_audit_emails(db)
@@ -252,7 +256,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="MCP Gateway",
     description="Multi-tenant MCP server with authentication and RBAC",
-    version="1.0.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -282,8 +286,18 @@ def _get_cors_origins() -> list[str]:
         parsed = urlparse(o)
         if not parsed.scheme or not parsed.netloc:
             raise ValueError(f"Invalid CORS origin: {o!r} — must be an absolute URL")
+        # A browser Origin header never carries a trailing slash, so an
+        # origin configured with one silently matches nothing.
+        if o.endswith("/"):
+            _cors_logger.warning(
+                "CORS origin %r has a trailing slash; using %r. "
+                "Browser Origin headers never include one.", o, o.rstrip("/"),
+            )
+            o = o.rstrip("/")
         validated.append(o)
-    return validated or [settings.base_url.rstrip("/")]
+    effective = validated or [settings.base_url.rstrip("/")]
+    _cors_logger.info("CORS allowed origins: %s", ", ".join(effective))
+    return effective
 
 app.add_middleware(
     CORSMiddleware,

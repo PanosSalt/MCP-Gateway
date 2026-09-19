@@ -140,8 +140,14 @@ async def _sync_entra_role(user: User, db: Session) -> None:
     unreachable, the behaviour depends on the failure mode:
 
     * **Config missing** — the user's refresh is rejected (raises 403).
-    * **Graph unreachable** — logged as a warning; existing DB role is kept.
-      A user removed from all groups will retain their role until Graph recovers.
+    * **Graph unreachable** (``RuntimeError``) — logged as a warning; existing
+      DB role is kept.  A user removed from all groups will retain their role
+      until Graph recovers.
+    * **Anything else** — propagates.  An unexpected exception is a bug, and
+      swallowing it would silently extend the caller's current role.
+
+    Called before the refresh token is revoked, so raising here leaves the
+    caller's existing token usable.
     """
     config = (
         db.query(TenantEntraConfig)
@@ -162,7 +168,10 @@ async def _sync_entra_role(user: User, db: Session) -> None:
         group_ids = await entra_service.get_user_group_ids_by_oid(
             config, user.entra_oid,
         )
-    except Exception:
+    except RuntimeError:
+        # entra_service normalises every Graph/transport failure to
+        # RuntimeError.  Anything else is a bug and must not be swallowed
+        # into a silent role extension.
         logger.warning(
             "Could not reach Azure AD to re-resolve role for user %s; "
             "proceeding with existing role (%s)",
@@ -265,6 +274,7 @@ def protected_resource_metadata(slug: str, request: Request) -> dict:
 
 
 @router.post("/oauth/register")
+@limiter.limit("10/minute")
 async def oauth_register(slug: str, request: Request) -> dict:
     body = await request.json()
     redirect_uris = body.get("redirect_uris", [])
@@ -384,7 +394,9 @@ async def oauth_login_submit(
 
 
 @router.get("/oauth/entra-callback")
+@limiter.limit("20/minute")
 async def oauth_entra_callback(
+    request: Request,
     slug: str,
     code: str,
     state: str,
@@ -505,16 +517,19 @@ async def oauth_token(
         if not token_row:
             raise HTTPException(status_code=400, detail="Invalid or expired refresh token")
 
-        token_row.revoked_at = now
-        db.commit()
-
         user = db.query(User).filter(User.id == token_row.user_id).first()
         if not user or not user.is_active:
             logger.error("Valid refresh token redeemed but user %s not found/inactive", token_row.user_id)
             raise HTTPException(status_code=500, detail="Authentication error")
 
+        # Re-resolve the role *before* revoking.  A transient Entra failure
+        # that raises here must not consume the caller's only refresh token —
+        # otherwise an admin misconfiguration logs every user out permanently.
         if user.auth_provider == AuthProvider.entra and user.entra_oid:
             await _sync_entra_role(user, db)
+
+        token_row.revoked_at = now
+        db.commit()
 
         write_audit_log(db, "oauth.token_refreshed", user=user)
         return _issue_token_response(user, db)

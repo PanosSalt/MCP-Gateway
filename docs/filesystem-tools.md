@@ -34,6 +34,11 @@ services:
 
 Use `:ro` (read-only) for directories that should not be writable even by admin users.
 
+> The shipped `docker-compose.yml` mounts `./data:/data` and `./projects:/projects`
+> **read-write**, without `:ro`. If you enable the write tools and want a mount to
+> stay read-only, add `:ro` yourself — the gateway's role checks do not make the
+> filesystem read-only, the mount flag does.
+
 ---
 
 ## Security Model
@@ -41,9 +46,13 @@ Use `:ro` (read-only) for directories that should not be writable even by admin 
 All filesystem operations are restricted to the configured allowed directories:
 
 - Every path argument is resolved to an absolute path via `os.path.realpath()`
-- The resolved path must start with one of the allowed directories
+- The resolved path must either **equal** an allowed directory or begin with it
+  followed by a path separator. The separator matters: it is what stops
+  `/data-evil` from passing a check for `/data`
 - Symlinks are resolved before validation, preventing symlink escapes
 - Path traversal (`../`) is blocked by the realpath resolution
+- Entries in `FILESYSTEM_ALLOWED_DIRS` must be absolute and free of `..`, or the
+  gateway refuses to start
 
 If a path is outside the allowed directories, the tool returns an error and the operation is denied.
 
@@ -72,6 +81,8 @@ Read a file and return its contents as UTF-8 text.
 
 Returns the file contents as text. Binary files will produce encoding errors.
 
+Files larger than **10 MB** are refused with an error rather than read.
+
 #### `fs_list_directory`
 
 List the contents of a directory with type indicators.
@@ -80,12 +91,15 @@ List the contents of a directory with type indicators.
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Absolute path to the directory |
 
-Returns entries prefixed with `[FILE]` or `[DIR]`:
+Returns entries prefixed with `[FILE]` or `[DIR]`, one per line, sorted by name:
 ```
-[DIR]  reports/
-[FILE] summary.csv
+[DIR] reports
 [FILE] README.md
+[FILE] summary.csv
 ```
+
+Names carry no trailing slash. An empty directory returns the literal string
+`(empty directory)`.
 
 #### `fs_directory_tree`
 
@@ -94,9 +108,11 @@ Recursively list the directory structure as JSON.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Absolute path to the root directory |
-| `max_depth` | integer | No | Maximum recursion depth (default: 5) |
+| `max_depth` | integer | No | Maximum recursion depth (default: 5, hard cap 10) |
 
-Returns a JSON tree with names, types, and children.
+Returns a JSON tree with names, types, and children. Values above 10 are
+silently clamped to 10. Directories that cannot be read are skipped rather than
+raising.
 
 #### `fs_search_files`
 
@@ -107,7 +123,13 @@ Search for files matching a glob pattern.
 | `path` | string | Yes | Directory to search in |
 | `pattern` | string | Yes | Glob pattern (e.g. `*.csv`, `**/*.json`) |
 
-Returns a list of matching file paths.
+Returns newline-separated matching paths, or `No matches found.` when there are
+none.
+
+Two behaviours worth knowing: the pattern is matched against **directory names
+as well as file names**, so directories appear in the results; and the search
+stops after roughly 1000 matches, so a broad pattern returns a truncated list
+with no indication that it was cut short.
 
 #### `fs_get_file_info`
 
@@ -117,7 +139,12 @@ Get metadata about a file or directory.
 |-----------|------|----------|-------------|
 | `path` | string | Yes | Absolute path to the file |
 
-Returns size (bytes), creation time, modification time, and whether it is a file or directory.
+Returns a JSON object with `path`, `type` (`file` or `directory`), `size_bytes`,
+`created`, `modified`, `accessed` and `permissions`.
+
+`permissions` is the octal `st_mode`. If the sandbox contains files whose
+mode you would rather not expose to tool callers, restrict this tool with a
+per-tool role override.
 
 ### Write Operations (admin only)
 
@@ -151,6 +178,9 @@ Move or rename a file or directory.
 
 Both source and destination must be within allowed directories.
 
+This is **not** an overwrite: if the destination already exists the call fails
+with `Destination already exists`. Delete or move the existing entry first.
+
 ---
 
 ## Audit Trail
@@ -164,6 +194,15 @@ All filesystem tool invocations are logged to the audit trail:
 | `fs.fs_read_file.error` | Read failed (permission, not found, etc.) |
 | `fs.fs_write_file.error` | Write failed |
 
-The same pattern applies to all other filesystem tools (`fs.fs_list_directory`, `fs.fs_create_directory`, etc.).
+The same pattern applies to all other filesystem tools (`fs.fs_list_directory`, `fs.fs_create_directory`, etc.). A `fs.{tool}.denied` event is written when the caller's role is below the tool's minimum.
 
-Metadata includes the path, and for errors, the error message.
+Metadata is `{"tool": ..., "args": {...}}`. Within `args`:
+
+- Path arguments appear twice — as supplied (`path`) and as resolved
+  (`path_resolved`). Audit against the resolved form; it reflects the real
+  target after symlink resolution.
+- `content` is never recorded, only its length as `"<N chars>"`.
+- Error entries add an `error` key and still carry the attempted path, so a
+  blocked traversal shows which path was tried.
+
+See [audit-logging.md](audit-logging.md) for the full event catalogue.

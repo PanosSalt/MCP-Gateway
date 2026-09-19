@@ -11,6 +11,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from mcp.types import TextContent, Tool
 
@@ -26,12 +27,55 @@ _READ_ROLE = Role.analyst
 _WRITE_ROLE = Role.admin
 
 
-def _allowed_dirs() -> list[str]:
+@lru_cache(maxsize=1)
+def _configured_dirs() -> tuple[str, ...]:
+    """Resolved FILESYSTEM_ALLOWED_DIRS entries, regardless of existence.
+
+    Cached: this is read on every tool listing and every path validation,
+    and the setting cannot change without a restart.
+    """
     raw = get_settings().filesystem_allowed_dirs.strip()
     if not raw:
-        return []
-    dirs = [os.path.realpath(d.strip()) for d in raw.split(",") if d.strip()]
-    return [d for d in dirs if os.path.isdir(d)]
+        return ()
+    return tuple(
+        os.path.realpath(d.strip()) for d in raw.split(",") if d.strip()
+    )
+
+
+@lru_cache(maxsize=1)
+def _allowed_dirs() -> tuple[str, ...]:
+    """Configured directories that actually exist on disk."""
+    return tuple(d for d in _configured_dirs() if os.path.isdir(d))
+
+
+def validate_allowed_dirs_at_startup() -> None:
+    """Log the effective sandbox so misconfiguration is visible at boot.
+
+    Non-existent entries are dropped silently at request time, which makes a
+    typo look like a permission error to the caller.  Say so once, loudly.
+    """
+    configured = _configured_dirs()
+    if not configured:
+        logger.info(
+            "FILESYSTEM_ALLOWED_DIRS is empty — filesystem tools are disabled."
+        )
+        return
+    for d in configured:
+        if os.path.isdir(d):
+            logger.info("Filesystem tools allowed directory: %s", d)
+        elif os.path.exists(d):
+            logger.warning(
+                "FILESYSTEM_ALLOWED_DIRS entry is not a directory, ignoring: %s", d
+            )
+        else:
+            logger.warning(
+                "FILESYSTEM_ALLOWED_DIRS entry does not exist, ignoring: %s", d
+            )
+    if not _allowed_dirs():
+        logger.warning(
+            "No FILESYSTEM_ALLOWED_DIRS entries are usable — "
+            "filesystem tools will not be exposed."
+        )
 
 
 def _validate_path(path: str) -> str:
@@ -243,6 +287,45 @@ _HANDLERS: dict[str, object] = {
 }
 
 
+# ── Audit ────────────────────────────────────────────────────────────────────
+
+#: Arguments naming a filesystem location.  Recorded both as requested and as
+#: resolved, so the trail reflects what was actually touched after symlink
+#: resolution — not the string the caller typed.
+_PATH_ARGS = ("path", "source", "destination")
+
+_AUDIT_MAX_CHARS = 200
+
+
+def _audit_metadata(name: str, args: dict) -> dict:
+    """Build audit metadata for a filesystem call.
+
+    File *content* is never recorded — only its length.  Writing the first
+    200 bytes of every uploaded file into the audit log would turn the log
+    itself into a copy of the sandbox.
+    """
+    recorded: dict = {}
+    for key, value in args.items():
+        if key == "content":
+            recorded[key] = (
+                f"<{len(value)} chars>" if isinstance(value, str)
+                else "<redacted>"
+            )
+        elif key in _PATH_ARGS and isinstance(value, str):
+            recorded[key] = value[:_AUDIT_MAX_CHARS]
+            try:
+                recorded[f"{key}_resolved"] = os.path.realpath(
+                    os.path.expanduser(value)
+                )[:_AUDIT_MAX_CHARS]
+            except (OSError, ValueError):
+                pass
+        elif isinstance(value, str):
+            recorded[key] = value[:_AUDIT_MAX_CHARS]
+        else:
+            recorded[key] = value
+    return {"tool": name, "args": recorded}
+
+
 # ── Provider ─────────────────────────────────────────────────────────────────
 
 class FilesystemToolProvider:
@@ -283,25 +366,31 @@ class FilesystemToolProvider:
             ctx.db, ctx.user.tenant_id, name, default_role,
         )
         if not has_min_role(ctx.user.role, effective):
+            write_audit_log(
+                ctx.db, f"fs.{name}.denied", user=ctx.user, ip=ctx.ip,
+                metadata=_audit_metadata(name, args),
+            )
             return [TextContent(type="text", text="Permission denied")]
 
+        meta = _audit_metadata(name, args)
         try:
             result = await handler(args)  # type: ignore[operator]
-            write_audit_log(ctx.db, f"fs.{name}", user=ctx.user, metadata={
-                "tool": name,
-                "args": {k: (v[:200] if isinstance(v, str) else v) for k, v in args.items()},
-            })
+            write_audit_log(
+                ctx.db, f"fs.{name}", user=ctx.user, ip=ctx.ip, metadata=meta,
+            )
             return [TextContent(type="text", text=result)]
         except (PermissionError, FileNotFoundError, FileExistsError, IsADirectoryError) as exc:
-            write_audit_log(ctx.db, f"fs.{name}.error", user=ctx.user, metadata={
-                "tool": name, "error": str(exc),
-            })
+            write_audit_log(
+                ctx.db, f"fs.{name}.error", user=ctx.user, ip=ctx.ip,
+                metadata={**meta, "error": str(exc)},
+            )
             return [TextContent(type="text", text=f"Error: {exc}")]
         except Exception as exc:
             logger.error("Filesystem tool %s failed: %s", name, exc, exc_info=True)
-            write_audit_log(ctx.db, f"fs.{name}.error", user=ctx.user, metadata={
-                "tool": name, "error": str(exc),
-            })
+            write_audit_log(
+                ctx.db, f"fs.{name}.error", user=ctx.user, ip=ctx.ip,
+                metadata={**meta, "error": str(exc)},
+            )
             return [TextContent(type="text", text=f"Error: {exc}")]
 
 

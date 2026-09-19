@@ -16,9 +16,26 @@ python_version = "3.12"
 ignore_missing_imports = true
 exclude = ["alembic/"]
 
-# Temporary: these modules still use legacy SQLAlchemy patterns that mypy
-# interprets as Column[...] at runtime-facing callsites. Keep mypy enabled
-# for the rest of the app until these modules are migrated to Mapped[].
+# These modules still use legacy SQLAlchemy patterns that mypy interprets as
+# Column[...] at runtime-facing callsites.
+#
+# Be aware of what this costs: the list below covers nearly the whole
+# application, so `mypy app/` currently verifies very little. Treat a passing
+# mypy run as a weak signal until the list shrinks.
+#
+# Measured error counts when each override is lifted individually (2026-09-19)
+# — use these to pick off the cheap ones first:
+#
+#   app.api.tenants 1      app.config 1           app.core.dependencies 1
+#   app.main 1             app.services.llm 1     app.tools 1
+#   app.api.connections 2  app.api.mcp_sse 3      app.api.tools 3
+#   app.api.auth 4         app.tools.filesystem 4 app.api.api_keys 5
+#   app.api.query 5        app.models 5           app.tools.example 5
+#   app.api.auth_entra 10  app.services.entra 10  app.api.oauth 17
+#   app.tools.sql 21
+#
+# Migrating app.models to Mapped[] first should reduce several of the others.
+# Remove each entry here as its module is fixed; do not add new ones.
 [[tool.mypy.overrides]]
 module = [
   "app.api.api_keys",
@@ -45,6 +62,13 @@ ignore_errors = true
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
+# Keep every other copy of the version in lockstep. app/__init__.py feeds the
+# FastAPI/OpenAPI version; server.json is the MCP registry manifest. Without
+# these, both silently drift on each release.
+version_variables = [
+    "app/__init__.py:__version__",
+    "server.json:\"version\"",
+]
 branch = "main"
 changelog_file = "CHANGELOG.md"
 build_command = ""

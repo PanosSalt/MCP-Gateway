@@ -11,7 +11,7 @@ Before deploying, ensure these environment variables are set with secure, unique
 | Variable | How to Generate |
 |----------|-----------------|
 | `SECRET_KEY` | `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| `ENCRYPTION_KEY` | `python3 -c "import secrets; print(secrets.token_hex(32))"` (min 32 chars; longer keys add entropy) |
+| `ENCRYPTION_KEY` | `python3 -c "import secrets; print(secrets.token_hex(32))"` (min 32 chars — the app will not start below that; the full key is consumed via BLAKE2b, so longer keys add entropy. Do not truncate) |
 | `POSTGRES_PASSWORD` | `python3 -c "import secrets; print(secrets.token_urlsafe(24))"` |
 | `BASE_URL` | Your public URL, e.g. `https://mcp-gateway.example.com` (no trailing slash) |
 | `ANTHROPIC_API_KEY` | From [console.anthropic.com](https://console.anthropic.com/) (required for `/query/` endpoint) |
@@ -20,9 +20,17 @@ Optional but recommended for production:
 
 | Variable | Notes |
 |----------|-------|
-| `CORS_ORIGINS` | Comma-separated allowed origins. Defaults to `BASE_URL` |
+| `CORS_ORIGINS` | Comma-separated allowed origins. Defaults to `BASE_URL`. Absolute URLs only; omit trailing slashes (they are stripped with a warning, since browser `Origin` headers never carry one) |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Default `15`. Shorter is more secure |
-| `FILESYSTEM_ALLOWED_DIRS` | Leave empty to disable filesystem tools |
+| `FILESYSTEM_ALLOWED_DIRS` | Leave empty to disable filesystem tools. Entries must be absolute and contain no `..`, or the app refuses to start |
+| `WEB_CONCURRENCY` | Uvicorn worker count, default **`1`**. The stack ships single-worker — raise this to use more than one core |
+| `REDIS_URL` | Shared rate-limiter storage. **Set this whenever `WEB_CONCURRENCY > 1`**, otherwise each worker keeps its own counters and every documented rate limit is multiplied by the worker count |
+| `TRUST_PROXY_HEADERS` | Set to `true` when running behind the reverse proxy configured below, so rate limits key on `X-Forwarded-For` rather than the proxy's own IP. Leave `false` if nothing trustworthy sets that header — clients can otherwise spoof it |
+| `LOG_LEVEL` | Default `INFO` |
+
+The startup log records the effective CORS origins and each allowed filesystem
+directory, warning on entries that do not exist. Check it after the first
+deploy — a mistyped directory is otherwise silently dropped.
 
 ---
 
@@ -155,7 +163,19 @@ docker compose up -d --build
 
 This starts:
 - `api` on port 8000 (FastAPI + admin UI)
-- `db` on port 5432 (PostgreSQL, internal)
+- `db` — PostgreSQL, reachable only on the compose network. It publishes **no**
+  host port, so `localhost:5432` will not reach it; use `docker compose exec db
+  psql` instead
+
+Two sample database services (`sample_postgres`, `sample_mysql`) are defined but
+gated behind the `dev` profile, so they do not start here. Use
+`docker compose --profile dev up -d` if you want them.
+
+Compose fails immediately if `POSTGRES_PASSWORD`, `SECRET_KEY` or
+`ENCRYPTION_KEY` are unset — they are declared `${VAR:?}`. The application
+performs its own startup validation as well: it refuses to boot if `SECRET_KEY`
+or `ENCRYPTION_KEY` still hold their placeholder values or if `ENCRYPTION_KEY`
+is shorter than 32 characters. These are hard failures, not warnings.
 
 ### 3. Reverse proxy with Caddy (recommended)
 
@@ -260,7 +280,21 @@ The `entrypoint.sh` runs `alembic upgrade head` automatically on each container 
 
 ### Health check
 
-`GET /health` returns `{"status": "ok"}` when the database is reachable, `503` otherwise. Use this for load balancer health checks, Kubernetes probes, or uptime monitors.
+`GET /health` is a combined **liveness and readiness** probe returning
+`{"status": "ok"}`. Use it for load balancer health checks, Kubernetes probes,
+or uptime monitors.
+
+It returns `503` in two distinct cases:
+
+| Cause | Body |
+|-------|------|
+| Database unreachable | `Database unavailable` |
+| Applied migration revision ≠ latest | `Pending migrations: at {current}, expected {expected}` |
+
+The second is easy to mistake for a database outage. If `/health` fails
+immediately after a deploy while the database is plainly up, check the
+migration state first — `entrypoint.sh` runs `alembic upgrade head` on start,
+so this usually means that step failed.
 
 ### Logs
 

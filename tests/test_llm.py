@@ -144,6 +144,58 @@ def test_assert_safe_select_with_mysql_dialect():
     )
 
 
+def test_assert_safe_select_with_sqlite_dialect():
+    assert_safe_select(
+        "SELECT name FROM users LIMIT 1", db_type="sqlite"
+    )
+
+
+def test_assert_safe_select_with_mssql_dialect():
+    assert_safe_select(
+        "SELECT TOP 1 [name] FROM [users]", db_type="mssql"
+    )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE TABLE t (id INT)",
+        "CREATE VIEW v AS SELECT 1",
+        "ALTER TABLE users ADD COLUMN x INT",
+        "TRUNCATE TABLE users",
+    ],
+)
+def test_assert_safe_select_rejects_ddl(sql):
+    """DDL nodes are declared forbidden; make sure each is actually caught."""
+    with pytest.raises(ValueError, match="Non-SELECT|Forbidden operation"):
+        assert_safe_select(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "PRAGMA table_info(users)",
+        "ATTACH DATABASE '/tmp/evil.db' AS evil",
+        "EXEC sp_who",
+    ],
+)
+def test_assert_safe_select_rejects_command_nodes(sql):
+    """Statements that are neither SELECT nor parseable must not get through.
+
+    Which arm rejects them varies — ATTACH fails to parse, PRAGMA and EXEC
+    parse to a Command node — but every one must raise.
+    """
+    with pytest.raises(
+        ValueError, match="Non-SELECT|Forbidden operation|failed to parse",
+    ):
+        assert_safe_select(sql)
+
+
+def test_assert_safe_select_rejects_unparseable_sql():
+    with pytest.raises(ValueError, match="failed to parse"):
+        assert_safe_select("SELECT FROM WHERE ((((")
+
+
 # ---------------------------------------------------------------------------
 # Async mock helper
 # ---------------------------------------------------------------------------

@@ -16,12 +16,15 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env
-# Edit .env — set DATABASE_URL to a local Postgres instance or leave for SQLite fallback
+# Edit .env — DATABASE_URL is required and has no default; point it at a local Postgres
+# instance (e.g. postgresql://user:pass@localhost:5432/mcpgw). The app will not start
+# without it. Tests are separate and configure their own in-memory SQLite.
 alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-Run the test suite (no external services required — uses SQLite in-memory):
+Run the test suite. The tests configure their own in-memory SQLite, so no database or
+other external service needs to be running:
 
 ```bash
 python -m pytest tests/ -v
@@ -39,19 +42,82 @@ All tests must pass before submitting a PR.
 
 ## Adding a custom tool
 
-Drop a file in `app/tools/` and use the `@register_tool` decorator:
+Tools are supplied by **provider classes**, not decorated functions. A provider
+implements three methods — `get_tools`, `get_tool_defaults` and `handle` — and
+registers itself with `register()`.
+
+Create a file in `app/tools/`:
 
 ```python
-from app.tools import register_tool, ToolContext
-from mcp.types import TextContent
+# app/tools/my_tool.py
+from __future__ import annotations
 
-@register_tool(name="my_tool", min_role="analyst")
-async def my_tool(arguments: dict, ctx: ToolContext) -> list[TextContent]:
-    result = do_something(arguments["input"])
-    return [TextContent(type="text", text=result)]
+from mcp.types import TextContent, Tool
+
+from app.core.rbac import has_min_role
+from app.models import Role
+from app.tools import ToolContext, ToolDefault, get_effective_min_role, register
+
+_MY_TOOL = Tool(
+    name="my_tool",
+    description="What this tool does.",
+    inputSchema={
+        "type": "object",
+        "properties": {"input": {"type": "string"}},
+        "required": ["input"],
+    },
+)
+
+_DEFAULT_MIN_ROLE = Role.analyst
+
+
+class MyToolProvider:
+    def get_tools(self, ctx: ToolContext) -> list[Tool]:
+        """Tools this user may see. Return [] to hide them."""
+        effective = get_effective_min_role(
+            ctx.db, ctx.user.tenant_id, "my_tool", _DEFAULT_MIN_ROLE,
+        )
+        return [_MY_TOOL] if has_min_role(ctx.user.role, effective) else []
+
+    def get_tool_defaults(self, ctx: ToolContext) -> list[ToolDefault]:
+        """Metadata for the admin UI's role-override screen."""
+        return [
+            ToolDefault(
+                name="my_tool",
+                tool_type="custom",
+                description=_MY_TOOL.description,
+                default_min_role=_DEFAULT_MIN_ROLE,
+            ),
+        ]
+
+    async def handle(
+        self, name: str, args: dict, ctx: ToolContext
+    ) -> list[TextContent] | None:
+        """Return None for tools you don't own so the next provider sees them."""
+        if name != "my_tool":
+            return None
+        effective = get_effective_min_role(
+            ctx.db, ctx.user.tenant_id, "my_tool", _DEFAULT_MIN_ROLE,
+        )
+        if not has_min_role(ctx.user.role, effective):
+            return [TextContent(type="text", text="Permission denied")]
+        return [TextContent(type="text", text=do_something(args["input"]))]
+
+
+register(MyToolProvider())
 ```
 
-The tool is auto-discovered on startup. No other wiring needed.
+Then add the import at the bottom of `app/tools/__init__.py` so the module is
+loaded — registration happens at import time, and there is no auto-discovery:
+
+```python
+from app.tools import example, filesystem, my_tool, sql  # noqa: E402,F401
+```
+
+Re-check the role inside `handle`. `get_tools` only controls visibility; a
+client can still call a tool it was never shown.
+
+`app/tools/example.py` is a working minimal provider to copy from.
 
 ## Commit messages
 
@@ -81,7 +147,12 @@ Commits that don't follow this format are ignored by the release process but are
 
 ## Code style
 
-- Python: follow the existing style (no strict linter enforced yet)
+- Python: `ruff` and `mypy` both run in CI and will block a PR. Run them locally
+  before pushing:
+  ```bash
+  python -m ruff check app/ tests/
+  python -m mypy app/
+  ```
 - Keep functions small and focused
 - Prefer explicit over clever
 

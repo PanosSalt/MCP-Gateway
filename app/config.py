@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from pydantic import model_validator
@@ -34,6 +35,16 @@ class Settings(BaseSettings):
     # When empty, no filesystem tools are exposed.
     filesystem_allowed_dirs: str = ""
     log_level: str = "INFO"
+    # Shared storage for the rate limiter.  Empty means in-memory, which is
+    # per-process and therefore does not hold across multiple workers.
+    redis_url: str = ""
+    # Number of uvicorn workers; mirrors WEB_CONCURRENCY in entrypoint.sh.
+    # Only used to warn when rate limits cannot be enforced globally.
+    web_concurrency: int = 1
+    # Honour X-Forwarded-For when deriving the rate-limit key.  Enable only
+    # when a trusted reverse proxy sets the header, otherwise clients can
+    # spoof it to bypass rate limits.
+    trust_proxy_headers: bool = False
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -53,6 +64,20 @@ class Settings(BaseSettings):
                 "The full key is consumed via BLAKE2b derivation, so longer keys "
                 "(e.g. a 64-char hex string) provide proportionally more entropy."
             )
+        for entry in self.filesystem_allowed_dirs.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if not os.path.isabs(entry):
+                raise ValueError(
+                    f"FILESYSTEM_ALLOWED_DIRS entry {entry!r} must be an "
+                    "absolute path."
+                )
+            if ".." in entry.split(os.sep):
+                raise ValueError(
+                    f"FILESYSTEM_ALLOWED_DIRS entry {entry!r} must not contain "
+                    "'..' path segments."
+                )
         return self
 
 

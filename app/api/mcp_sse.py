@@ -55,12 +55,12 @@ def _get_transport(slug: str) -> SseServerTransport:
     return _tenant_transports[slug]
 
 
-def build_mcp_server(user_id: str, db: Session) -> Server:
+def build_mcp_server(user_id: str, db: Session, ip: str | None = None) -> Server:
     server = Server("mcp-gateway")
 
     def _fresh_ctx() -> ToolContext:
         user = db.query(User).filter(User.id == user_id).first()
-        return ToolContext(user=user, db=db)
+        return ToolContext(user=user, db=db, ip=ip)
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
@@ -104,10 +104,11 @@ async def mcp_sse(
         if not tenant or user.tenant_id != tenant.id:
             raise HTTPException(status_code=403, detail="Token not valid for this tenant")
 
-        sse_transport = _get_transport(slug)
-        mcp_server = build_mcp_server(user.id, db)
-
         client_ip = request.client.host if request.client else "unknown"
+
+        sse_transport = _get_transport(slug)
+        mcp_server = build_mcp_server(user.id, db, ip=client_ip)
+
         logger.info(
             "SSE connect: tenant=%s user=%s (%s) client=%s",
             slug, user.email, user.id, client_ip,
@@ -171,6 +172,14 @@ async def mcp_messages(slug: str, request: Request):
 
 # ── Legacy /mcp/sse endpoint (API-key auth, deprecated) ──────────────────────
 
+#: Advertised in the `Sunset` response header (RFC 8594) on every legacy
+#: request. The original 2026-06-01 date passed while these routes were still
+#: mounted and serving traffic, which is worse than advertising no date at all:
+#: clients that honour Sunset were told the endpoint was already gone.
+#: When this date is reached, remove `legacy_router` from app/main.py rather
+#: than moving it again.
+LEGACY_SUNSET_DATE = b"2027-03-01"
+
 
 @legacy_router.get("/sse")
 async def legacy_mcp_sse(request: Request, api_key: str | None = None, token: str | None = None):
@@ -190,13 +199,15 @@ async def legacy_mcp_sse(request: Request, api_key: str | None = None, token: st
             raise HTTPException(status_code=401, detail="api_key or token query param required")
 
         sse_transport = _legacy_transport
-        mcp_server = build_mcp_server(user.id, db)
+        mcp_server = build_mcp_server(
+            user.id, db, ip=request.client.host if request.client else None,
+        )
 
         async def send_with_deprecation(message):
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
                 headers.append((b"deprecation", b"true"))
-                headers.append((b"sunset", b"2026-06-01"))
+                headers.append((b"sunset", LEGACY_SUNSET_DATE))
                 message = {**message, "headers": headers}
             await request._send(message)
 
